@@ -116,3 +116,11 @@ def test_the_seed_of_the_database_serves_the_tuition_gate(store):
     laura = store.find_current(UUID("11111111-1111-4111-8111-111111111111"), "2026-B")
     assert santiago is not None and santiago.status is InvoiceStatus.ISSUED
     assert laura is not None and laura.status is InvoiceStatus.PAID and laura.provider_reference == "SIM-00000001"
+
+
+def test_a_retry_of_the_same_key_returns_the_first_invoice_even_against_the_unique_index(store):
+    first = new_invoice()
+    store.create(first, "key-retry-000001", invoice_issued(first))
+    retry = new_invoice()  # same student and term: would trip INV-BIL-001 if the key were claimed last
+    again, created = store.create(retry, "key-retry-000001", invoice_issued(retry))
+    assert created is False and again == first

@@ -68,13 +68,8 @@ class PostgresInvoiceStore:
     def create(self, invoice: Invoice, idempotency_key: str, event: DomainEvent) -> tuple[Invoice, bool]:
         try:
             with self._pool.connection() as conn, conn.transaction():
-                try:
-                    conn.execute(
-                        f"INSERT INTO billing.invoice ({COLUMNS}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        _values(invoice),
-                    )
-                except psycopg.errors.UniqueViolation as cause:
-                    raise DuplicateInvoice() from cause
+                # The key first: a retry of the same intention returns the first invoice instead of
+                # tripping over the index of INV-BIL-001 that its own first attempt filled.
                 taken = conn.execute(
                     "INSERT INTO billing.idempotency_key (key, resource_type, resource_id) VALUES (%s, 'invoice', %s) "
                     "ON CONFLICT (key) DO NOTHING RETURNING key",
@@ -82,6 +77,13 @@ class PostgresInvoiceStore:
                 ).fetchone()
                 if taken is None:
                     raise _KeyAlreadyUsed()
+                try:
+                    conn.execute(
+                        f"INSERT INTO billing.invoice ({COLUMNS}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        _values(invoice),
+                    )
+                except psycopg.errors.UniqueViolation as cause:
+                    raise DuplicateInvoice() from cause
                 _write_event(conn, event)
         except _KeyAlreadyUsed:
             earlier = self.find_by_key(idempotency_key)
