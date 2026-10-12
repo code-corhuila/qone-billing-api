@@ -15,6 +15,10 @@ class Role(StrEnum):
 
 @dataclass(frozen=True)
 class Caller:
-    user_id: UUID
+    """`user_id` is the person's id; a SERVICE token carries the service name as subject and
+    no user id (07-api/authentication.md: `sub` is the service name, never an app_user row)."""
+
+    user_id: UUID | None
     role: Role
     name: str = ""
+    subject: str = ""
