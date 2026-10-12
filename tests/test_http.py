@@ -186,7 +186,8 @@ class TestRepresentationAndTransitions:
         assert client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=admin()).status_code == 403
 
     def test_the_current_term_invoice_for_the_saga(self, client):
-        r = client.get(f"{BASE}/students/{SANTIAGO}/invoices/current", headers=bearer(WORKFLOW, "SERVICE"))
+        # A service token carries the service name as subject, not a UUID (07-api/authentication.md).
+        r = client.get(f"{BASE}/students/{SANTIAGO}/invoices/current", headers=bearer("qone-workflow", "SERVICE"))
         assert r.status_code == 200 and r.json()["id"] == SANTIAGO_INVOICE and r.json()["status"] == "ISSUED"
         assert client.get(f"{BASE}/students/{NEW_STUDENT}/invoices/current", headers=admin()).status_code == 404
         assert client.get(f"{BASE}/students/{SANTIAGO}/invoices/current", headers=santiago()).status_code == 403
