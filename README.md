@@ -44,14 +44,45 @@ tests/                       test_invoice_model.py, test_invoices.py, test_http.
 ## How to run it
 
 ```bash
-python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
+python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scriptsctivate
 pip install -e ".[dev]"
 ruff check .
-python -m pytest                                   # domain, use cases, HTTP, architecture
+python -m pytest                                   # domain, use cases, HTTP, contract, architecture
+cp .env.example .env                               # JWT_PUBLIC_KEY (or _FILE), BILLING_DATABASE_URL, CURRENT_TERM
+python -m apps.api                                 # http://localhost:8000/api/v1/billing/health
 ```
 
-The HTTP server, its configuration (`.env.example`) and the PostgreSQL adapter arrive with the
-next pull requests of HU-BIL-001.
+Without `BILLING_DATABASE_URL` the service starts over an in-memory store with the synthetic
+invoices of the seed (development only; it says so in the log). With it, the store is
+`qone-billing-db`: start that repository's compose, run its Flyway runner, and point the URL at
+it. The public key is the one `qone-infra/scripts/dev-keys.sh` writes; the service never holds
+the private key (norm 5.3.7).
+
+Integration tests against the real schema (Annex C) run only when `TEST_DATABASE_URL` is set:
+
+```bash
+TEST_DATABASE_URL=postgresql://billing:password@localhost:5432/billing python -m pytest tests/test_postgres_integration.py
+```
+
+Container image and compose (`deploy/`, Annex G): `docker build -f deploy/Dockerfile -t
+qone-billing-api:dev .`. `deploy/compose.yml` is what `qone-infra` includes: `expose` only,
+after `billing-db` is healthy.
+
+Explicit limits (norm 5.3.10), declared in `apps/api/factory.py`:
+
+| Limit | Value |
+|---|---|
+| Connection pool | 10 connections, 5 s wait |
+| Statement timeout | 5 s |
+| Keep-alive | 60 s |
+| Graceful shutdown | 20 s |
+| Header read | imposed by the gateway (NGINX `client_header_timeout`) |
+
+Every log line is JSON with the `traceId` of the request (norm 5.3.9); the detail of a 500
+goes there, never to the client.
+
+`scripts/sync-contracts.sh [ref]` refreshes the contract copies in
+`contracts/openapi/` from `qone-docs` with the GitHub CLI.
 
 ## Branching
 
