@@ -58,15 +58,17 @@ invoices of the seed (development only; it says so in the log). With it, the sto
 it. The public key is the one `qone-infra/scripts/dev-keys.sh` writes; the service never holds
 the private key (norm 5.3.7).
 
-Integration tests against the real schema (Annex C) run only when `TEST_DATABASE_URL` is set:
+Integration tests against the real schema (Annex C) run only when `TEST_DATABASE_URL` is set;
+`ci.yml` clones `qone-billing-db`, migrates a fresh PostgreSQL and runs them:
 
 ```bash
 TEST_DATABASE_URL=postgresql://billing:password@localhost:5432/billing python -m pytest tests/test_postgres_integration.py
 ```
 
 Container image and compose (`deploy/`, Annex G): `docker build -f deploy/Dockerfile -t
-qone-billing-api:dev .`. `deploy/compose.yml` is what `qone-infra` includes: `expose` only,
-after `billing-db` is healthy.
+qone-billing-api:dev .`, then `deploy/smoke.sh` against the running container (health, the
+envelope on 401 and 404, the correlation header); `ci.yml` builds and smoke-checks the image.
+`deploy/compose.yml` is what `qone-infra` includes: `expose` only, after `billing-db` is healthy.
 
 Explicit limits (norm 5.3.10), declared in `apps/api/factory.py`:
 
