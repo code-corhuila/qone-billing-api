@@ -42,7 +42,10 @@ class TokenVerifier:
         except jwt.PyJWTError as cause:
             raise AuthError() from cause
         try:
-            return Caller(UUID(str(claims["sub"])), Role(claims.get("role", "")), str(claims.get("name", "")))
+            role = Role(claims.get("role", ""))
+            subject = str(claims["sub"])
+            user_id = None if role is Role.SERVICE else UUID(subject)
+            return Caller(user_id, role, str(claims.get("name", "")), subject)
         except ValueError as cause:
             raise AuthError() from cause
 
