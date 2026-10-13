@@ -1,0 +1,191 @@
+openapi: 3.0.3
+info:
+  title: qone-billing-api
+  version: 2.0.0
+  description: |
+    Billing domain of Qampus (ADR-006): the term invoice, the simulated payment and the tuition
+    state the enrollment saga checks first (ADR-008, step `check-tuition`). Operations
+    BI-01..BI-06 of `../../endpoint-catalog.md`. Money is `amountCents` (COP cents, integer).
+    Shared components: `./_shared.yaml`. Data: `06-data/models.md`, schema `billing`.
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Through qone-api-gateway
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: invoices
+
+paths:
+  /billing/health:
+    get:
+      tags: [invoices]
+      summary: Liveness of the billing service (BI-01)
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: './_shared.yaml#/components/schemas/Health' }
+
+  /billing/invoices/me:
+    get:
+      tags: [invoices]
+      summary: My invoices, newest first (BI-02)
+      description: STUDENT only. One invoice per term (INV-BIL-001), so `term` returns at most one row.
+      parameters:
+        - $ref: './_shared.yaml#/components/parameters/Page'
+        - $ref: './_shared.yaml#/components/parameters/Limit'
+        - name: term
+          in: query
+          schema: { $ref: './_shared.yaml#/components/schemas/Term' }
+      responses:
+        '200':
+          description: A page of invoices
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvoicePage' }
+        '400': { $ref: './_shared.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './_shared.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './_shared.yaml#/components/responses/Forbidden' }
+
+  /billing/invoices:
+    post:
+      tags: [invoices]
+      summary: Issue the term invoice of a student (BI-04)
+      description: |
+        ADMIN only. A second invoice for the same student and term is
+        `422 BUSINESS_RULE_VIOLATION` (`INV-BIL-001`). The seed issues one invoice per student
+        for the current term; this operation covers new students and new terms.
+      parameters:
+        - $ref: './_shared.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IssueInvoiceRequest' }
+      responses:
+        '201':
+          description: Invoice issued
+          headers:
+            Location: { $ref: './_shared.yaml#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invoice' }
+        '200':
+          description: Same `Idempotency-Key` - the invoice issued the first time
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invoice' }
+        '400': { $ref: './_shared.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './_shared.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './_shared.yaml#/components/responses/Forbidden' }
+        '422': { $ref: './_shared.yaml#/components/responses/BusinessRuleViolation' }
+
+  /billing/invoices/{id}:
+    get:
+      tags: [invoices]
+      summary: One invoice (BI-03)
+      description: The owner, an ADMIN or a SERVICE token. Another student's invoice is `404` (D-03).
+      parameters:
+        - $ref: './_shared.yaml#/components/parameters/Id'
+      responses:
+        '200':
+          description: The invoice
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invoice' }
+        '400': { $ref: './_shared.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './_shared.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './_shared.yaml#/components/responses/NotFound' }
+
+  /billing/invoices/{id}/pay:
+    post:
+      tags: [invoices]
+      summary: Pay my invoice with the simulated provider (BI-05)
+      description: |
+        Owner only. Moves `ISSUED` to `PAID` exactly once (`INV-BIL-002`), sets
+        `providerReference` and `paidAt`, and writes `TuitionPaid` to the outbox in the same
+        transaction. Paying a `PAID` invoice returns it unchanged with `200` (D-04). No body.
+      parameters:
+        - $ref: './_shared.yaml#/components/parameters/Id'
+      responses:
+        '200':
+          description: The invoice, `PAID`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invoice' }
+        '400': { $ref: './_shared.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './_shared.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './_shared.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './_shared.yaml#/components/responses/NotFound' }
+
+  /billing/students/{studentId}/invoices/current:
+    get:
+      tags: [invoices]
+      summary: The current-term invoice of a student - the saga's tuition gate (BI-06)
+      description: |
+        ADMIN or SERVICE (`qone-workflow`, step `check-tuition`). `404` when the student has no
+        invoice for the current term; the saga treats that as `TUITION_UNPAID`.
+      parameters:
+        - name: studentId
+          in: path
+          required: true
+          schema: { $ref: './_shared.yaml#/components/schemas/UUID' }
+      responses:
+        '200':
+          description: The invoice of the current term
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invoice' }
+        '400': { $ref: './_shared.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './_shared.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './_shared.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './_shared.yaml#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth: { $ref: './_shared.yaml#/components/securitySchemes/bearerAuth' }
+
+  schemas:
+    InvoiceStatus:
+      type: string
+      description: '`ISSUED` -> `PAID`; `PAID` is terminal (INV-BIL-002)'
+      enum: [ISSUED, PAID]
+
+    IssueInvoiceRequest:
+      type: object
+      required: [studentId, studentName, term, amountCents]
+      properties:
+        studentId: { $ref: './_shared.yaml#/components/schemas/UUID' }
+        studentName: { type: string, minLength: 2, maxLength: 120, description: Snapshot; billing does not read identity-db }
+        term: { $ref: './_shared.yaml#/components/schemas/Term' }
+        amountCents: { $ref: './_shared.yaml#/components/schemas/MoneyCents' }
+
+    Invoice:
+      type: object
+      required: [id, studentId, studentName, term, amountCents, status, createdAt]
+      properties:
+        id: { $ref: './_shared.yaml#/components/schemas/UUID' }
+        studentId: { $ref: './_shared.yaml#/components/schemas/UUID' }
+        studentName: { type: string }
+        term: { $ref: './_shared.yaml#/components/schemas/Term' }
+        amountCents: { $ref: './_shared.yaml#/components/schemas/MoneyCents' }
+        status: { $ref: '#/components/schemas/InvoiceStatus' }
+        providerReference: { type: string, nullable: true, example: SIM-7F3A9C21 }
+        paidAt:
+          nullable: true
+          allOf: [{ $ref: './_shared.yaml#/components/schemas/DateTime' }]
+        createdAt: { $ref: './_shared.yaml#/components/schemas/DateTime' }
+
+    InvoicePage:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Invoice' }
+        meta: { $ref: './_shared.yaml#/components/schemas/PageMeta' }
