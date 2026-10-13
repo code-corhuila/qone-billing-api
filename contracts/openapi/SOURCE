@@ -1,0 +1,5 @@
+repository: code-corhuila/qone-docs
+ref: docs/adr-009-front-stack-and-testing
+commit: 11b364d67d193e95d909ed2010d66cc54de26c1a
+synced: 2026-10-12T16:42:25Z
+files: _shared.yaml qone-billing-api.yaml
