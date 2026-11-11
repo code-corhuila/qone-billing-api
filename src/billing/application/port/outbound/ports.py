@@ -49,3 +49,12 @@ class IdGenerator(Protocol):
 class PaymentProvider(Protocol):
     def charge(self, invoice: Invoice) -> str:
         """Charges the invoice and returns the provider's reference (1 to 40 characters)."""
+
+
+class DependencyProbe(Protocol):
+    """A dependency the service needs to take traffic (HU-PLT-004): `ping` returns when it answers
+    within the adapter's short timeout and raises otherwise."""
+
+    name: str
+
+    def ping(self) -> None: ...

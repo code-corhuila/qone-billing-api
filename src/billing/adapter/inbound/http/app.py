@@ -13,6 +13,7 @@ from billing.adapter.inbound.http import errors, metrics
 from billing.adapter.inbound.http.auth import TokenVerifier
 from billing.adapter.inbound.http.router import router
 from billing.application.port.inbound.invoices import InvoiceUseCases
+from billing.application.usecase.readiness import CheckReadiness
 
 SERVICE = "qone-billing-api"
 VERSION = "2.0.0"
@@ -21,10 +22,11 @@ CORRELATION_HEADER = "X-Correlation-Id"
 access = logging.getLogger("billing.access")
 
 
-def create_app(use_cases: InvoiceUseCases, verifier: TokenVerifier) -> FastAPI:
+def create_app(use_cases: InvoiceUseCases, verifier: TokenVerifier, readiness: CheckReadiness) -> FastAPI:
     app = FastAPI(title=SERVICE, version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.use_cases = use_cases
     app.state.verifier = verifier
+    app.state.readiness = readiness
     app.state.service = SERVICE
     app.state.version = VERSION
 
