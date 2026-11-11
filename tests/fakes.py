@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from billing.application.port.outbound.ports import PaymentDeclined, PaymentProviderUnavailable
 from billing.domain.model.invoice import Invoice
 
 
@@ -32,15 +33,23 @@ class SequenceIds:
 
 class FakeProvider:
     """Charges once per idempotency key, like a real provider: a retry with the same key returns
-    the first reference. `charges` keeps the invoices actually charged, `keys` every key received."""
+    the first reference. `declines` makes it refuse every charge and `unavailable` makes it not
+    answer, the two failures of the PaymentProvider port. `charges` keeps the invoices actually
+    charged, `keys` every key received."""
 
-    def __init__(self) -> None:
+    def __init__(self, declines: bool = False, unavailable: bool = False) -> None:
         self.charges: list[Invoice] = []
         self.keys: list[str] = []
         self._references: dict[str, str] = {}
+        self.declines = declines
+        self.unavailable = unavailable
 
     def charge(self, invoice: Invoice, idempotency_key: str) -> str:
         self.keys.append(idempotency_key)
+        if self.unavailable:
+            raise PaymentProviderUnavailable("the provider did not answer")
+        if self.declines:
+            raise PaymentDeclined("insufficient funds")
         if idempotency_key not in self._references:
             self.charges.append(invoice)
             self._references[idempotency_key] = f"SIM-{len(self.charges):08d}"

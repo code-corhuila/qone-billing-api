@@ -37,6 +37,13 @@ tests/                       test_invoice_model.py, test_invoices.py, test_http.
   unique index of `qone-billing-db`.
 - `pay` moves `ISSUED` to `PAID` exactly once; paying again returns the same invoice with `200`
   (INV-BIL-002, D-04).
+- A declined payment changes nothing: the invoice stays `ISSUED`, no `TuitionPaid` is written and
+  the answer is `422 {"error":"PAYMENT_DECLINED","message":"the payment provider declined the
+  charge: <reason>","traceId":...}`; the student may pay again. A provider that does not answer
+  is `503 SERVICE_UNAVAILABLE` (`payment provider is not reachable`), also with the invoice
+  `ISSUED`. The simulated provider declines, deterministically, every amount whose cents part
+  is `51` (e.g. `amountCents: 185000051`; ISO 8583 code 51, insufficient funds) and approves any
+  other amount, so the seed and the portal's happy path are unchanged.
 - Money is an integer in COP cents end to end (norm 5.4.3).
 - Every creation is idempotent by `Idempotency-Key` (norm 5.3.8); every change writes its event
   to the outbox in the same transaction (norm 5.3.11).

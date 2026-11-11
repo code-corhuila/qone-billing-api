@@ -15,6 +15,20 @@ class DuplicateInvoice(Exception):
     INV-BIL-001 fired under a race the use case's own check did not see)."""
 
 
+class PaymentDeclined(Exception):
+    """The provider answered and refused the charge (insufficient funds, card refused): nothing
+    was charged, so the invoice stays ISSUED and no TuitionPaid is written."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class PaymentProviderUnavailable(Exception):
+    """The provider did not answer (timeout, connection refused): the invoice stays ISSUED and
+    the student may try again."""
+
+
 class InvoiceStore(Protocol):
     def find_by_key(self, idempotency_key: str) -> Invoice | None:
         """The invoice an earlier request with this Idempotency-Key created, if any."""
@@ -51,7 +65,9 @@ class IdGenerator(Protocol):
 class PaymentProvider(Protocol):
     def charge(self, invoice: Invoice, idempotency_key: str) -> str:
         """Charges the invoice and returns the provider's reference (1 to 40 characters). The
-        provider charges once per key: a retry with the same key returns the first reference."""
+        provider charges once per key: a retry with the same key returns the first reference.
+        Raises PaymentDeclined when the provider refuses it and PaymentProviderUnavailable when
+        it does not answer."""
 
 
 class DependencyProbe(Protocol):
