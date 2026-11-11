@@ -86,6 +86,12 @@ goes there, never to the client.
 `scripts/sync-contracts.sh [ref]` refreshes the contract copies in
 `contracts/openapi/` from `qone-docs` with the GitHub CLI.
 
+Metrics (HU-OBS-001): `GET /metrics` at the root of the container (outside `/api/v1`, never
+routed by the gateway) answers the Prometheus text format with
+`http_server_requests_total{service,method,route,status_class}` and
+`http_server_request_duration_seconds{service,method,route}`; `route` is the matched route
+template (`unmatched` otherwise) and the scrape itself is not counted.
+
 ## Branching
 
 Three permanent branches. **None of them accepts a direct commit** — you enter through a child
