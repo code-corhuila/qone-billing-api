@@ -7,9 +7,10 @@ from uuid import UUID, uuid4
 import pytest
 
 from billing.adapter.outbound.persistence.memory import InMemoryInvoiceStore
-from billing.application.errors import Forbidden, NotFound
+from billing.application.errors import DependencyUnavailable, Forbidden, NotFound
 from billing.application.port.inbound.caller import Caller, Role
 from billing.application.port.inbound.invoices import IssueInvoice
+from billing.application.port.outbound.ports import PaymentDeclined
 from billing.application.usecase.invoices import InvoiceService
 from billing.domain.model.errors import BusinessRuleViolation, ValidationError
 from billing.domain.model.invoice import InvoiceStatus
@@ -128,6 +129,37 @@ class TestPay:
         _, _, _, service_ = world
         with pytest.raises(NotFound):
             service_.pay(laura, uuid4())
+
+    def test_a_declined_charge_leaves_the_invoice_issued_and_writes_no_tuition_paid(self, world):
+        store, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        provider.declines = True
+        with pytest.raises(PaymentDeclined) as caught:
+            service_.pay(laura, invoice.id)
+        assert caught.value.reason == "insufficient funds"
+        stored = store.find(invoice.id)
+        assert stored.status is InvoiceStatus.ISSUED and stored.provider_reference is None and stored.paid_at is None
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued"] and provider.charges == []
+
+    def test_a_provider_that_does_not_answer_is_unavailable_and_the_invoice_stays_issued(self, world):
+        store, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        provider.unavailable = True
+        with pytest.raises(DependencyUnavailable) as caught:
+            service_.pay(laura, invoice.id)
+        assert caught.value.dependency == "payment provider"
+        assert store.find(invoice.id).status is InvoiceStatus.ISSUED
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued"]
+
+    def test_after_a_decline_the_student_may_pay_again_and_it_is_paid_once(self, world):
+        store, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        provider.declines = True
+        with pytest.raises(PaymentDeclined):
+            service_.pay(laura, invoice.id)
+        provider.declines = False
+        assert service_.pay(laura, invoice.id).status is InvoiceStatus.PAID
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued", "TuitionPaid"] and len(provider.charges) == 1
 
 
 class TestGet:
