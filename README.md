@@ -37,9 +37,20 @@ tests/                       test_invoice_model.py, test_invoices.py, test_http.
   unique index of `qone-billing-db`.
 - `pay` moves `ISSUED` to `PAID` exactly once; paying again returns the same invoice with `200`
   (INV-BIL-002, D-04).
+- A declined payment changes nothing: the invoice stays `ISSUED`, no `TuitionPaid` is written and
+  the answer is `422 {"error":"PAYMENT_DECLINED","message":"the payment provider declined the
+  charge: <reason>","traceId":...}`; the student may pay again. A provider that does not answer
+  is `503 SERVICE_UNAVAILABLE` (`payment provider is not reachable`), also with the invoice
+  `ISSUED`. The simulated provider declines, deterministically, every amount whose cents part
+  is `51` (e.g. `amountCents: 185000051`; ISO 8583 code 51, insufficient funds) and approves any
+  other amount, so the seed and the portal's happy path are unchanged.
 - Money is an integer in COP cents end to end (norm 5.4.3).
 - Every creation is idempotent by `Idempotency-Key` (norm 5.3.8); every change writes its event
   to the outbox in the same transaction (norm 5.3.11).
+- No double charge: the invoice id is the provider's idempotency key (a retry after a failed
+  save gets the first charge back), and `save_paid` is a conditional
+  `UPDATE ... WHERE id = ? AND status = 'ISSUED'` whose row count decides which request writes
+  `TuitionPaid`; a request that loses the race answers the invoice already `PAID`.
 - The `Idempotency-Key` belongs to its owner (the user id of the token, or the SERVICE subject):
   the same key from another caller is another key, so a replay never returns an invoice someone
   else created. The same owner and key with the same body returns the first invoice (`200`);

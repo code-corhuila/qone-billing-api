@@ -7,7 +7,7 @@ import pytest
 
 from billing.adapter.outbound.persistence.memory import InMemoryInvoiceStore
 from billing.application.port.outbound.ports import DuplicateInvoice, IdempotencyClaim
-from billing.domain.model.events import invoice_issued
+from billing.domain.model.events import invoice_issued, tuition_paid
 from billing.domain.model.invoice import Invoice
 
 NOW = datetime(2026, 10, 12, tzinfo=UTC)
@@ -41,6 +41,17 @@ def test_the_same_key_of_another_owner_is_another_key():
     assert store.find_by_key(ROCIO, "key-0001") == (rocios, "b" * 64)
     assert store.find_by_key(PATRICIA, "key-0001") == (patricias, "a" * 64)
     assert store.find_by_key("someone-else", "key-0001") is None
+
+
+def test_save_paid_moves_only_an_issued_invoice_and_returns_the_stored_one():
+    store = InMemoryInvoiceStore()
+    invoice = an_invoice()
+    store.create(invoice, claim("key-0001"), invoice_issued(invoice))
+    first, _ = invoice.pay("SIM-00000001", NOW)
+    assert store.save_paid(first, tuition_paid(first)) == first
+    late, _ = invoice.pay("SIM-00000002", NOW)
+    assert store.save_paid(late, tuition_paid(late)) == first
+    assert [e.event_type for e in store.outbox] == ["InvoiceIssued", "TuitionPaid"]
 
 
 def test_the_unique_index_of_inv_bil_001_is_simulated():

@@ -2,6 +2,7 @@
 with the same semantics the PostgreSQL adapter must keep: one invoice per student and term,
 a key used once, events kept next to the change."""
 
+import threading
 from uuid import UUID
 
 from billing.application.port.outbound.ports import DuplicateInvoice, IdempotencyClaim
@@ -14,6 +15,7 @@ class InMemoryInvoiceStore:
         self._invoices: dict[UUID, Invoice] = {i.id: i for i in invoices or []}
         self._keys: dict[tuple[str, str], tuple[UUID, str]] = {}  # (owner, key) -> (invoice id, request hash)
         self.outbox: list[DomainEvent] = []
+        self._lock = threading.Lock()
 
     def find_by_key(self, owner: str, idempotency_key: str) -> tuple[Invoice, str] | None:
         recorded = self._keys.get((owner, idempotency_key))
@@ -48,9 +50,14 @@ class InMemoryInvoiceStore:
         start = (page - 1) * limit
         return rows[start : start + limit], len(rows)
 
-    def save_paid(self, invoice: Invoice, event: DomainEvent) -> None:
-        self._invoices[invoice.id] = invoice
-        self.outbox.append(event)
+    def save_paid(self, invoice: Invoice, event: DomainEvent) -> Invoice:
+        with self._lock:  # the conditional update of the PostgreSQL adapter
+            stored = self._invoices[invoice.id]
+            if stored.is_paid:
+                return stored
+            self._invoices[invoice.id] = invoice
+            self.outbox.append(event)
+            return invoice
 
 
 class InMemoryProbe:

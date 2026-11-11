@@ -7,7 +7,7 @@ import hashlib
 import json
 from uuid import UUID
 
-from billing.application.errors import Forbidden, IdempotencyKeyReused, NotFound
+from billing.application.errors import DependencyUnavailable, Forbidden, IdempotencyKeyReused, NotFound
 from billing.application.port.inbound.caller import Caller, Role
 from billing.application.port.inbound.invoices import MAX_LIMIT, InvoiceUseCases, Issued, IssueInvoice, Page
 from billing.application.port.outbound.ports import (
@@ -17,6 +17,7 @@ from billing.application.port.outbound.ports import (
     IdGenerator,
     InvoiceStore,
     PaymentProvider,
+    PaymentProviderUnavailable,
 )
 from billing.domain.model.errors import BusinessRuleViolation, FieldError, ValidationError
 from billing.domain.model.events import invoice_issued, tuition_paid
@@ -91,11 +92,17 @@ class InvoiceService(InvoiceUseCases):
         invoice = self._visible(caller, invoice_id)
         if invoice.is_paid:
             return invoice  # INV-BIL-002, D-04: the same invoice, no second charge
-        reference = self._payments.charge(invoice)
-        paid, changed = invoice.pay(reference, self._clock.now())
-        if changed:
-            self._store.save_paid(paid, tuition_paid(paid))
-        return paid
+        # A declined charge (PaymentDeclined) or a provider that does not answer leaves the
+        # invoice ISSUED: nothing is written before the provider approves. The invoice id is the
+        # provider's idempotency key: a retry after a failed save, or a second request racing
+        # this one, gets the first charge back instead of a new one. The store's conditional
+        # update decides which request writes TuitionPaid; the other one gets the invoice PAID.
+        try:
+            reference = self._payments.charge(invoice, idempotency_key=str(invoice.id))
+        except PaymentProviderUnavailable as cause:
+            raise DependencyUnavailable("payment provider") from cause
+        paid, _ = invoice.pay(reference, self._clock.now())
+        return self._store.save_paid(paid, tuition_paid(paid))
 
     def current_of(self, caller: Caller, student_id: UUID) -> Invoice:
         _require(caller, Role.ADMIN, Role.SERVICE)
