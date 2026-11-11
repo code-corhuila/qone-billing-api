@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from billing.adapter.outbound.persistence.memory import InMemoryInvoiceStore
-from billing.application.errors import Forbidden, NotFound
+from billing.application.errors import Forbidden, IdempotencyKeyReused, NotFound
 from billing.application.port.inbound.caller import Caller, Role
 from billing.application.port.inbound.invoices import IssueInvoice
 from billing.application.usecase.invoices import InvoiceService
@@ -18,10 +18,12 @@ from tests.fakes import FakeProvider, FixedClock, SequenceIds
 LAURA = UUID("11111111-1111-4111-8111-111111111111")
 SANTIAGO = UUID("11111111-1111-4111-8111-111111111112")
 PATRICIA = UUID("33333333-3333-4333-8333-333333333331")
+ROCIO = UUID("33333333-3333-4333-8333-333333333332")
 CARLOS = UUID("22222222-2222-4222-8222-222222222221")
 WORKFLOW = UUID("44444444-4444-4444-8444-444444444441")
 
 admin = Caller(PATRICIA, Role.ADMIN, "Patricia Mora")
+other_admin = Caller(ROCIO, Role.ADMIN, "Rocío Méndez")
 laura = Caller(LAURA, Role.STUDENT, "Laura Gómez")
 santiago = Caller(SANTIAGO, Role.STUDENT, "Santiago Rojas")
 professor = Caller(CARLOS, Role.PROFESSOR, "Carlos Ramírez")
@@ -53,12 +55,33 @@ class TestIssue:
         assert [e.event_type for e in store.outbox] == ["InvoiceIssued"]
         assert store.find(result.invoice.id) == result.invoice
 
-    def test_the_same_key_returns_the_first_invoice_and_creates_nothing(self, world):
+    def test_the_same_key_and_body_returns_the_first_invoice_and_creates_nothing(self, world):
         store, _, _, service_ = world
         first = issue(service_)
-        again = issue(service_, name="Other Name", cents=1)
+        again = issue(service_)
         assert again.created is False and again.invoice == first.invoice
         assert len(store.outbox) == 1
+
+    def test_the_same_key_with_another_body_is_refused_and_creates_nothing(self, world):
+        store, _, _, service_ = world
+        issue(service_)
+        with pytest.raises(IdempotencyKeyReused):
+            issue(service_, student=SANTIAGO, name="Santiago Rojas", cents=1)
+        assert store.find_current(SANTIAGO, "2026-B") is None and len(store.outbox) == 1
+
+    def test_the_key_belongs_to_its_owner_another_admin_gets_his_own_invoice(self, world):
+        _, _, _, service_ = world
+        patricias = issue(service_)
+        rocios = issue(service_, student=SANTIAGO, name="Santiago Rojas", caller=other_admin)
+        assert rocios.created is True and rocios.invoice.id != patricias.invoice.id
+        assert rocios.invoice.student_id == SANTIAGO
+
+    def test_another_admin_replaying_the_key_and_body_never_gets_the_first_invoice(self, world):
+        _, _, _, service_ = world
+        issue(service_)
+        with pytest.raises(BusinessRuleViolation) as caught:  # her own new request: INV-BIL-001
+            issue(service_, caller=other_admin)
+        assert str(caught.value).startswith("INV-BIL-001")
 
     def test_a_second_invoice_for_the_same_student_and_term_breaks_inv_bil_001(self, world):
         _, _, _, service_ = world

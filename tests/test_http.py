@@ -148,6 +148,20 @@ class TestIdempotentCreation:
         assert r.status_code == 422 and r.json()["error"] == "BUSINESS_RULE_VIOLATION"
         assert r.json()["message"].startswith("INV-BIL-001")
 
+    def test_the_key_is_scoped_to_its_owner_and_another_body_is_422(self, client):
+        rocio = bearer("33333333-3333-4333-8333-333333333332", "ADMIN", "Rocío Méndez")
+        first = client.post(f"{BASE}/invoices", json=VALID_BODY, headers={**admin(), **KEY})
+        assert first.status_code == 201
+        santiago_next = {**VALID_BODY, "studentId": SANTIAGO, "studentName": "Santiago Rojas", "term": "2027-A"}
+        hers = client.post(f"{BASE}/invoices", json=santiago_next, headers={**rocio, **KEY})
+        assert hers.status_code == 201 and hers.json()["id"] != first.json()["id"], "her own invoice"
+        assert hers.json()["studentId"] == SANTIAGO
+        reused = client.post(f"{BASE}/invoices", json=santiago_next, headers={**admin(), **KEY})
+        assert reused.status_code == 422 and reused.json()["error"] == "IDEMPOTENCY_KEY_REUSED"
+        assert set(reused.json()) == {"error", "message", "traceId"}
+        again = client.post(f"{BASE}/invoices", json=VALID_BODY, headers={**admin(), **KEY})
+        assert again.status_code == 200 and again.json()["id"] == first.json()["id"]
+
     def test_a_student_may_not_issue(self, client):
         r = client.post(f"{BASE}/invoices", json=VALID_BODY, headers={**laura(), **KEY})
         assert r.status_code == 403
