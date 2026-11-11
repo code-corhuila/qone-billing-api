@@ -1,8 +1,12 @@
 """HTTP level (Annex C): the checks of norm 5.3.12 the teacher runs by HTTP, automated against
 this service's resources, with the server in memory and the in-memory store."""
 
+from uuid import UUID
+
 import pytest
 
+from billing.adapter.outbound.payment.simulated import SimulatedPaymentProvider
+from tests.fakes import FakeProvider
 from tests.http_support import (
     CARLOS,
     LAURA,
@@ -180,6 +184,36 @@ class TestRepresentationAndTransitions:
         assert first.json()["providerReference"].startswith("SIM-") and first.json()["paidAt"] is not None
         again = client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=santiago())
         assert again.status_code == 200 and again.json() == first.json()
+
+    def test_a_declined_payment_is_422_payment_declined_and_another_students_payment_goes_through(self):
+        # The simulated provider itself: an amount whose cents part is 51 is declined (README).
+        client, store = make_client(provider=SimulatedPaymentProvider())
+        declined = {**VALID_BODY, "amountCents": 185000051}
+        created = client.post(f"{BASE}/invoices", json=declined, headers={**admin(), **KEY})
+        assert created.status_code == 201
+        invoice_id, new_student = created.json()["id"], bearer(NEW_STUDENT, "STUDENT", "Nuevo Estudiante")
+        traced = {**new_student, "X-Correlation-Id": "pay-declined-1"}
+        r = client.post(f"{BASE}/invoices/{invoice_id}/pay", headers=traced)
+        assert r.status_code == 422
+        assert r.json() == {
+            "error": "PAYMENT_DECLINED",
+            "message": "the payment provider declined the charge: insufficient funds",
+            "traceId": "pay-declined-1",
+        }
+        still = client.get(f"{BASE}/invoices/{invoice_id}", headers=new_student).json()
+        assert still["status"] == "ISSUED" and still["providerReference"] is None and still["paidAt"] is None
+        assert "TuitionPaid" not in [e.event_type for e in store.outbox]
+        paid = client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=santiago())
+        assert paid.status_code == 200 and paid.json()["status"] == "PAID"
+        assert [e.aggregate_id for e in store.outbox if e.event_type == "TuitionPaid"] == [UUID(SANTIAGO_INVOICE)]
+
+    def test_a_provider_that_does_not_answer_is_503_and_the_invoice_stays_issued(self):
+        client, store = make_client(provider=FakeProvider(unavailable=True))
+        r = client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=santiago())
+        assert r.status_code == 503
+        assert r.json()["error"] == "SERVICE_UNAVAILABLE" and r.json()["message"] == "payment provider is not reachable"
+        assert client.get(f"{BASE}/invoices/{SANTIAGO_INVOICE}", headers=santiago()).json()["status"] == "ISSUED"
+        assert store.outbox == []
 
     def test_only_the_owner_pays(self, client):
         assert client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=laura()).status_code == 404
