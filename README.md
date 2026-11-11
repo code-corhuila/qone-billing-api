@@ -40,6 +40,10 @@ tests/                       test_invoice_model.py, test_invoices.py, test_http.
 - Money is an integer in COP cents end to end (norm 5.4.3).
 - Every creation is idempotent by `Idempotency-Key` (norm 5.3.8); every change writes its event
   to the outbox in the same transaction (norm 5.3.11).
+- The `Idempotency-Key` belongs to its owner (the user id of the token, or the SERVICE subject):
+  the same key from another caller is another key, so a replay never returns an invoice someone
+  else created. The same owner and key with the same body returns the first invoice (`200`);
+  with another body (SHA-256 of the canonical body) it is `422 IDEMPOTENCY_KEY_REUSED`.
 
 ## How to run it
 

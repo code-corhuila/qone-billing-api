@@ -2,8 +2,9 @@
 connection pool (Annex C limits: pool size, wait for a connection, statement timeout).
 
 Idempotent creation (norm 5.3.8, Annex A): the invoice, its key and its event go in ONE
-transaction; the key is inserted with ON CONFLICT DO NOTHING and, when it already existed, the
-transaction is rolled back and the invoice the key created first is returned. The unique
+transaction; the key is scoped to its owner, PRIMARY KEY (owner_id, key) since V010 of
+qone-billing-db, and is inserted with ON CONFLICT DO NOTHING; when the owner already used it,
+the transaction is rolled back and the invoice the key created first is returned. The unique
 index of INV-BIL-001 surfaces as DuplicateInvoice. Every change writes its event to the
 outbox in the same transaction (norm 5.3.11)."""
 
@@ -17,13 +18,14 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from billing.application.port.outbound.ports import DuplicateInvoice
+from billing.application.port.outbound.ports import DuplicateInvoice, IdempotencyClaim
 from billing.domain.model.events import DomainEvent
 from billing.domain.model.invoice import Invoice, InvoiceStatus
 
 COLUMNS = (
     "id, student_id, student_name, term, amount_cents, status, provider_reference, paid_at, created_at, updated_at"
 )
+INVOICE_COLUMNS = ", ".join(f"i.{column}" for column in COLUMNS.split(", "))  # qualified, for joins
 
 
 def connect(
@@ -49,14 +51,15 @@ class PostgresInvoiceStore:
     def __init__(self, pool: ConnectionPool) -> None:
         self._pool = pool
 
-    def find_by_key(self, idempotency_key: str) -> Invoice | None:
+    def find_by_key(self, owner: str, idempotency_key: str) -> tuple[Invoice, str] | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                f"SELECT {COLUMNS} FROM billing.invoice WHERE id = "
-                "(SELECT resource_id FROM billing.idempotency_key WHERE key = %s)",
-                (idempotency_key,),
+                f"SELECT {INVOICE_COLUMNS}, k.request_hash FROM billing.invoice i "
+                "JOIN billing.idempotency_key k ON k.resource_id = i.id "
+                "WHERE k.owner_id = %s AND k.key = %s",
+                (owner, idempotency_key),
             ).fetchone()
-        return _invoice(row) if row else None
+        return (_invoice(row), row["request_hash"]) if row else None
 
     def exists(self, student_id: UUID, term: str) -> bool:
         with self._pool.connection() as conn:
@@ -67,15 +70,15 @@ class PostgresInvoiceStore:
                 is not None
             )
 
-    def create(self, invoice: Invoice, idempotency_key: str, event: DomainEvent) -> tuple[Invoice, bool]:
+    def create(self, invoice: Invoice, claim: IdempotencyClaim, event: DomainEvent) -> tuple[Invoice, bool]:
         try:
             with self._pool.connection() as conn, conn.transaction():
                 # The key first: a retry of the same intention returns the first invoice instead of
                 # tripping over the index of INV-BIL-001 that its own first attempt filled.
                 taken = conn.execute(
-                    "INSERT INTO billing.idempotency_key (key, resource_type, resource_id) VALUES (%s, 'invoice', %s) "
-                    "ON CONFLICT (key) DO NOTHING RETURNING key",
-                    (idempotency_key, invoice.id),
+                    "INSERT INTO billing.idempotency_key (owner_id, key, request_hash, resource_type, resource_id) "
+                    "VALUES (%s, %s, %s, 'invoice', %s) ON CONFLICT (owner_id, key) DO NOTHING RETURNING key",
+                    (claim.owner, claim.key, claim.request_hash, invoice.id),
                 ).fetchone()
                 if taken is None:
                     raise _KeyAlreadyUsed()
@@ -88,9 +91,9 @@ class PostgresInvoiceStore:
                     raise DuplicateInvoice() from cause
                 _write_event(conn, event)
         except _KeyAlreadyUsed:
-            earlier = self.find_by_key(idempotency_key)
+            earlier = self.find_by_key(claim.owner, claim.key)
             assert earlier is not None
-            return earlier, False
+            return earlier[0], False
         return invoice, True
 
     def find(self, invoice_id: UUID) -> Invoice | None:

@@ -4,7 +4,7 @@ a key used once, events kept next to the change."""
 
 from uuid import UUID
 
-from billing.application.port.outbound.ports import DuplicateInvoice
+from billing.application.port.outbound.ports import DuplicateInvoice, IdempotencyClaim
 from billing.domain.model.events import DomainEvent
 from billing.domain.model.invoice import Invoice
 
@@ -12,24 +12,27 @@ from billing.domain.model.invoice import Invoice
 class InMemoryInvoiceStore:
     def __init__(self, invoices: list[Invoice] | None = None) -> None:
         self._invoices: dict[UUID, Invoice] = {i.id: i for i in invoices or []}
-        self._keys: dict[str, UUID] = {}
+        self._keys: dict[tuple[str, str], tuple[UUID, str]] = {}  # (owner, key) -> (invoice id, request hash)
         self.outbox: list[DomainEvent] = []
 
-    def find_by_key(self, idempotency_key: str) -> Invoice | None:
-        invoice_id = self._keys.get(idempotency_key)
-        return self._invoices.get(invoice_id) if invoice_id else None
+    def find_by_key(self, owner: str, idempotency_key: str) -> tuple[Invoice, str] | None:
+        recorded = self._keys.get((owner, idempotency_key))
+        if recorded is None:
+            return None
+        invoice_id, request_hash = recorded
+        return self._invoices[invoice_id], request_hash
 
     def exists(self, student_id: UUID, term: str) -> bool:
         return any(i.student_id == student_id and i.term == term for i in self._invoices.values())
 
-    def create(self, invoice: Invoice, idempotency_key: str, event: DomainEvent) -> tuple[Invoice, bool]:
-        earlier = self.find_by_key(idempotency_key)
+    def create(self, invoice: Invoice, claim: IdempotencyClaim, event: DomainEvent) -> tuple[Invoice, bool]:
+        earlier = self.find_by_key(claim.owner, claim.key)
         if earlier is not None:
-            return earlier, False
+            return earlier[0], False
         if self.exists(invoice.student_id, invoice.term):
             raise DuplicateInvoice()
         self._invoices[invoice.id] = invoice
-        self._keys[idempotency_key] = invoice.id
+        self._keys[(claim.owner, claim.key)] = (invoice.id, claim.request_hash)
         self.outbox.append(event)
         return invoice, True
 

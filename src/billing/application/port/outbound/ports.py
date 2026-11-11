@@ -2,6 +2,7 @@
 idempotency keys and outbox, a clock, an id generator and the payment provider. The adapters
 implement them; the use cases know only these interfaces."""
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -15,17 +16,30 @@ class DuplicateInvoice(Exception):
     INV-BIL-001 fired under a race the use case's own check did not see)."""
 
 
+@dataclass(frozen=True)
+class IdempotencyClaim:
+    """An Idempotency-Key as its owner sent it: the key is scoped to the owner (the user id of
+    the token, or the SERVICE subject), so the same key from another caller is another key, and
+    `request_hash` is the SHA-256 (hex) of the canonical request body it was first used with."""
+
+    owner: str
+    key: str
+    request_hash: str
+
+
 class InvoiceStore(Protocol):
-    def find_by_key(self, idempotency_key: str) -> Invoice | None:
-        """The invoice an earlier request with this Idempotency-Key created, if any."""
+    def find_by_key(self, owner: str, idempotency_key: str) -> tuple[Invoice, str] | None:
+        """The invoice an earlier request of this owner with this key created, and the hash of
+        that request's body; None when this owner never used the key."""
 
     def exists(self, student_id: UUID, term: str) -> bool:
         """INV-BIL-001 pre-check."""
 
-    def create(self, invoice: Invoice, idempotency_key: str, event: DomainEvent) -> tuple[Invoice, bool]:
-        """Stores the invoice, its key and its event in ONE transaction (norm 5.3.8, 5.3.11).
-        Returns (invoice, True), or (the invoice the key created first, False) when the key was
-        already taken, in which case nothing new is kept. Raises DuplicateInvoice."""
+    def create(self, invoice: Invoice, claim: IdempotencyClaim, event: DomainEvent) -> tuple[Invoice, bool]:
+        """Stores the invoice, its claimed key and its event in ONE transaction (norm 5.3.8,
+        5.3.11). Returns (invoice, True), or (the invoice the owner's key created first, False)
+        when the owner had already used the key, in which case nothing new is kept. Raises
+        DuplicateInvoice."""
 
     def find(self, invoice_id: UUID) -> Invoice | None: ...
 
