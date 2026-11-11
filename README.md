@@ -73,7 +73,9 @@ Quality gates of `ci.yml` (HU-PLT-005), all blocking:
   in `ci.yml` together, never lower it.
 - **Dependency audit:** `pip install pip-audit && pip-audit --skip-editable` over the installed
   environment.
-- **Secret scan:** gitleaks `v8.21.2` over the whole history (`detect --redact`).
+- **Secret scan:** gitleaks `v8.21.2` over the whole history (`detect --redact`) with
+  `.gitleaks.toml`: the default rules, with `tests/` allowlisted (its fake keys and tokens are
+  fixtures, not secrets).
 
 Container image and compose (`deploy/`, Annex G): `docker build -f deploy/Dockerfile -t
 qone-billing-api:dev .`, then `deploy/smoke.sh` against the running container (health, the
