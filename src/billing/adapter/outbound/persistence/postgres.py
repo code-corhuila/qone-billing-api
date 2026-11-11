@@ -117,14 +117,21 @@ class PostgresInvoiceStore:
             ).fetchall()
         return [_invoice(r) for r in rows], int(total)
 
-    def save_paid(self, invoice: Invoice, event: DomainEvent) -> None:
+    def save_paid(self, invoice: Invoice, event: DomainEvent) -> Invoice:
+        # Conditional UPDATE: of two concurrent payments, the second waits for the row lock,
+        # re-reads the row already PAID and matches nothing; only the request whose UPDATE moved
+        # the row writes TuitionPaid, in the same transaction (INV-BIL-002).
         with self._pool.connection() as conn, conn.transaction():
-            conn.execute(
+            moved = conn.execute(
                 "UPDATE billing.invoice SET status = %s, provider_reference = %s, paid_at = %s, updated_at = %s "
-                "WHERE id = %s",
+                "WHERE id = %s AND status = 'ISSUED' RETURNING id",
                 (invoice.status.value, invoice.provider_reference, invoice.paid_at, invoice.updated_at, invoice.id),
-            )
-            _write_event(conn, event)
+            ).fetchone()
+            if moved is not None:
+                _write_event(conn, event)
+                return invoice
+            stored = conn.execute(f"SELECT {COLUMNS} FROM billing.invoice WHERE id = %s", (invoice.id,)).fetchone()
+        return _invoice(stored)
 
 
 def _write_event(conn: psycopg.Connection, event: DomainEvent) -> None:

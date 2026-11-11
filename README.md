@@ -47,6 +47,10 @@ tests/                       test_invoice_model.py, test_invoices.py, test_http.
 - Money is an integer in COP cents end to end (norm 5.4.3).
 - Every creation is idempotent by `Idempotency-Key` (norm 5.3.8); every change writes its event
   to the outbox in the same transaction (norm 5.3.11).
+- No double charge: the invoice id is the provider's idempotency key (a retry after a failed
+  save gets the first charge back), and `save_paid` is a conditional
+  `UPDATE ... WHERE id = ? AND status = 'ISSUED'` whose row count decides which request writes
+  `TuitionPaid`; a request that loses the race answers the invoice already `PAID`.
 
 ## How to run it
 
