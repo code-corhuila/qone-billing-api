@@ -45,6 +45,12 @@ def health(request: Request):
     return {"status": "ok", "service": request.app.state.service, "version": request.app.state.version}
 
 
+@router.get("/health/ready")
+def ready(request: Request):
+    checks = request.app.state.readiness.check()
+    return {"status": "ready", "service": request.app.state.service, "checks": checks}
+
+
 @router.get("/invoices/me")
 def my_invoices(
     who: Current,

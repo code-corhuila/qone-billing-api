@@ -13,8 +13,9 @@ from fastapi.testclient import TestClient
 
 from billing.adapter.inbound.http.app import create_app
 from billing.adapter.inbound.http.auth import TokenVerifier
-from billing.adapter.outbound.persistence.memory import InMemoryInvoiceStore
+from billing.adapter.outbound.persistence.memory import InMemoryInvoiceStore, InMemoryProbe
 from billing.application.usecase.invoices import InvoiceService
+from billing.application.usecase.readiness import CheckReadiness
 from billing.domain.model.invoice import Invoice
 from tests.fakes import FakeProvider, FixedClock, SequenceIds
 
@@ -64,8 +65,8 @@ def seed() -> list[Invoice]:
     return [laura, santiago]
 
 
-def make_client() -> tuple[TestClient, InMemoryInvoiceStore]:
+def make_client(readiness: CheckReadiness | None = None) -> tuple[TestClient, InMemoryInvoiceStore]:
     store = InMemoryInvoiceStore(seed())
     service = InvoiceService(store, FixedClock(), SequenceIds(start=10), FakeProvider(), current_term="2026-B")
-    app = create_app(service, TokenVerifier(PUBLIC_PEM))
+    app = create_app(service, TokenVerifier(PUBLIC_PEM), readiness or CheckReadiness([InMemoryProbe()]))
     return TestClient(app, raise_server_exceptions=False), store

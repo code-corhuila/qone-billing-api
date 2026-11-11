@@ -48,3 +48,12 @@ class InMemoryInvoiceStore:
     def save_paid(self, invoice: Invoice, event: DomainEvent) -> None:
         self._invoices[invoice.id] = invoice
         self.outbox.append(event)
+
+
+class InMemoryProbe:
+    """The ready probe of a service without a database: the in-memory store is always there."""
+
+    name = "database"
+
+    def ping(self) -> None:
+        return None
