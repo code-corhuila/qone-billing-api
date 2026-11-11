@@ -124,3 +124,9 @@ def test_a_retry_of_the_same_key_returns_the_first_invoice_even_against_the_uniq
     retry = new_invoice()  # same student and term: would trip INV-BIL-001 if the key were claimed last
     again, created = store.create(retry, "key-retry-000001", invoice_issued(retry))
     assert created is False and again == first
+
+
+def test_the_ready_probe_answers_against_the_real_engine(pool):
+    from billing.adapter.outbound.persistence.postgres import PostgresProbe
+
+    PostgresProbe(pool, timeout_seconds=2.0).ping()
