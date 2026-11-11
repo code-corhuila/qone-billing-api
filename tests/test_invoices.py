@@ -7,9 +7,10 @@ from uuid import UUID, uuid4
 import pytest
 
 from billing.adapter.outbound.persistence.memory import InMemoryInvoiceStore
-from billing.application.errors import Forbidden, NotFound
+from billing.application.errors import DependencyUnavailable, Forbidden, IdempotencyKeyReused, NotFound
 from billing.application.port.inbound.caller import Caller, Role
 from billing.application.port.inbound.invoices import IssueInvoice
+from billing.application.port.outbound.ports import PaymentDeclined
 from billing.application.usecase.invoices import InvoiceService
 from billing.domain.model.errors import BusinessRuleViolation, ValidationError
 from billing.domain.model.invoice import InvoiceStatus
@@ -18,10 +19,12 @@ from tests.fakes import FakeProvider, FixedClock, SequenceIds
 LAURA = UUID("11111111-1111-4111-8111-111111111111")
 SANTIAGO = UUID("11111111-1111-4111-8111-111111111112")
 PATRICIA = UUID("33333333-3333-4333-8333-333333333331")
+ROCIO = UUID("33333333-3333-4333-8333-333333333332")
 CARLOS = UUID("22222222-2222-4222-8222-222222222221")
 WORKFLOW = UUID("44444444-4444-4444-8444-444444444441")
 
 admin = Caller(PATRICIA, Role.ADMIN, "Patricia Mora")
+other_admin = Caller(ROCIO, Role.ADMIN, "Rocío Méndez")
 laura = Caller(LAURA, Role.STUDENT, "Laura Gómez")
 santiago = Caller(SANTIAGO, Role.STUDENT, "Santiago Rojas")
 professor = Caller(CARLOS, Role.PROFESSOR, "Carlos Ramírez")
@@ -53,12 +56,33 @@ class TestIssue:
         assert [e.event_type for e in store.outbox] == ["InvoiceIssued"]
         assert store.find(result.invoice.id) == result.invoice
 
-    def test_the_same_key_returns_the_first_invoice_and_creates_nothing(self, world):
+    def test_the_same_key_and_body_returns_the_first_invoice_and_creates_nothing(self, world):
         store, _, _, service_ = world
         first = issue(service_)
-        again = issue(service_, name="Other Name", cents=1)
+        again = issue(service_)
         assert again.created is False and again.invoice == first.invoice
         assert len(store.outbox) == 1
+
+    def test_the_same_key_with_another_body_is_refused_and_creates_nothing(self, world):
+        store, _, _, service_ = world
+        issue(service_)
+        with pytest.raises(IdempotencyKeyReused):
+            issue(service_, student=SANTIAGO, name="Santiago Rojas", cents=1)
+        assert store.find_current(SANTIAGO, "2026-B") is None and len(store.outbox) == 1
+
+    def test_the_key_belongs_to_its_owner_another_admin_gets_his_own_invoice(self, world):
+        _, _, _, service_ = world
+        patricias = issue(service_)
+        rocios = issue(service_, student=SANTIAGO, name="Santiago Rojas", caller=other_admin)
+        assert rocios.created is True and rocios.invoice.id != patricias.invoice.id
+        assert rocios.invoice.student_id == SANTIAGO
+
+    def test_another_admin_replaying_the_key_and_body_never_gets_the_first_invoice(self, world):
+        _, _, _, service_ = world
+        issue(service_)
+        with pytest.raises(BusinessRuleViolation) as caught:  # her own new request: INV-BIL-001
+            issue(service_, caller=other_admin)
+        assert str(caught.value).startswith("INV-BIL-001")
 
     def test_a_second_invoice_for_the_same_student_and_term_breaks_inv_bil_001(self, world):
         _, _, _, service_ = world
@@ -128,6 +152,74 @@ class TestPay:
         _, _, _, service_ = world
         with pytest.raises(NotFound):
             service_.pay(laura, uuid4())
+
+    def test_a_declined_charge_leaves_the_invoice_issued_and_writes_no_tuition_paid(self, world):
+        store, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        provider.declines = True
+        with pytest.raises(PaymentDeclined) as caught:
+            service_.pay(laura, invoice.id)
+        assert caught.value.reason == "insufficient funds"
+        stored = store.find(invoice.id)
+        assert stored.status is InvoiceStatus.ISSUED and stored.provider_reference is None and stored.paid_at is None
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued"] and provider.charges == []
+
+    def test_a_provider_that_does_not_answer_is_unavailable_and_the_invoice_stays_issued(self, world):
+        store, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        provider.unavailable = True
+        with pytest.raises(DependencyUnavailable) as caught:
+            service_.pay(laura, invoice.id)
+        assert caught.value.dependency == "payment provider"
+        assert store.find(invoice.id).status is InvoiceStatus.ISSUED
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued"]
+
+    def test_after_a_decline_the_student_may_pay_again_and_it_is_paid_once(self, world):
+        store, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        provider.declines = True
+        with pytest.raises(PaymentDeclined):
+            service_.pay(laura, invoice.id)
+        provider.declines = False
+        assert service_.pay(laura, invoice.id).status is InvoiceStatus.PAID
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued", "TuitionPaid"] and len(provider.charges) == 1
+
+    def test_the_invoice_id_is_the_providers_idempotency_key(self, world):
+        _, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        service_.pay(laura, invoice.id)
+        assert provider.keys == [str(invoice.id)]
+
+    def test_a_retry_after_the_save_failed_charges_once(self, world):
+        store, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        save_paid, calls = store.save_paid, []
+
+        def fails_the_first_time(paid, event):
+            calls.append(paid)
+            if len(calls) == 1:
+                raise RuntimeError("the database went away before the commit")
+            return save_paid(paid, event)
+
+        store.save_paid = fails_the_first_time
+        with pytest.raises(RuntimeError):
+            service_.pay(laura, invoice.id)
+        assert store.find(invoice.id).status is InvoiceStatus.ISSUED, "nothing was saved"
+        paid = service_.pay(laura, invoice.id)
+        assert paid.status is InvoiceStatus.PAID and paid.provider_reference == "SIM-00000001"
+        assert provider.keys == [str(invoice.id)] * 2 and len(provider.charges) == 1
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued", "TuitionPaid"]
+
+    def test_a_request_that_read_it_issued_after_another_paid_it_gets_the_paid_one_and_no_second_event(self, world):
+        store, clock, provider, service_ = world
+        invoice = issue(service_).invoice
+        first = service_.pay(laura, invoice.id)
+        store.find = lambda _id: invoice  # a concurrent request read it while it was still ISSUED
+        clock.tick(seconds=1)
+        again = service_.pay(laura, invoice.id)
+        assert again == first, "the stored PAID invoice, not a second payment"
+        assert len(provider.charges) == 1
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued", "TuitionPaid"]
 
 
 class TestGet:

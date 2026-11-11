@@ -2,11 +2,14 @@
 connection pool (Annex C limits: pool size, wait for a connection, statement timeout).
 
 Idempotent creation (norm 5.3.8, Annex A): the invoice, its key and its event go in ONE
-transaction; the key is inserted with ON CONFLICT DO NOTHING and, when it already existed, the
-transaction is rolled back and the invoice the key created first is returned. The unique
+transaction; the key is scoped to its owner, PRIMARY KEY (owner_id, key) since V010 of
+qone-billing-db, and is inserted with ON CONFLICT DO NOTHING; when the owner already used it,
+the transaction is rolled back and the invoice the key created first is returned. The unique
 index of INV-BIL-001 surfaces as DuplicateInvoice. Every change writes its event to the
 outbox in the same transaction (norm 5.3.11)."""
 
+import threading
+from concurrent.futures import Future
 from datetime import UTC
 from uuid import UUID
 
@@ -15,13 +18,14 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from billing.application.port.outbound.ports import DuplicateInvoice
+from billing.application.port.outbound.ports import DuplicateInvoice, IdempotencyClaim
 from billing.domain.model.events import DomainEvent
 from billing.domain.model.invoice import Invoice, InvoiceStatus
 
 COLUMNS = (
     "id, student_id, student_name, term, amount_cents, status, provider_reference, paid_at, created_at, updated_at"
 )
+INVOICE_COLUMNS = ", ".join(f"i.{column}" for column in COLUMNS.split(", "))  # qualified, for joins
 
 
 def connect(
@@ -47,14 +51,15 @@ class PostgresInvoiceStore:
     def __init__(self, pool: ConnectionPool) -> None:
         self._pool = pool
 
-    def find_by_key(self, idempotency_key: str) -> Invoice | None:
+    def find_by_key(self, owner: str, idempotency_key: str) -> tuple[Invoice, str] | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                f"SELECT {COLUMNS} FROM billing.invoice WHERE id = "
-                "(SELECT resource_id FROM billing.idempotency_key WHERE key = %s)",
-                (idempotency_key,),
+                f"SELECT {INVOICE_COLUMNS}, k.request_hash FROM billing.invoice i "
+                "JOIN billing.idempotency_key k ON k.resource_id = i.id "
+                "WHERE k.owner_id = %s AND k.key = %s",
+                (owner, idempotency_key),
             ).fetchone()
-        return _invoice(row) if row else None
+        return (_invoice(row), row["request_hash"]) if row else None
 
     def exists(self, student_id: UUID, term: str) -> bool:
         with self._pool.connection() as conn:
@@ -65,15 +70,15 @@ class PostgresInvoiceStore:
                 is not None
             )
 
-    def create(self, invoice: Invoice, idempotency_key: str, event: DomainEvent) -> tuple[Invoice, bool]:
+    def create(self, invoice: Invoice, claim: IdempotencyClaim, event: DomainEvent) -> tuple[Invoice, bool]:
         try:
             with self._pool.connection() as conn, conn.transaction():
                 # The key first: a retry of the same intention returns the first invoice instead of
                 # tripping over the index of INV-BIL-001 that its own first attempt filled.
                 taken = conn.execute(
-                    "INSERT INTO billing.idempotency_key (key, resource_type, resource_id) VALUES (%s, 'invoice', %s) "
-                    "ON CONFLICT (key) DO NOTHING RETURNING key",
-                    (idempotency_key, invoice.id),
+                    "INSERT INTO billing.idempotency_key (owner_id, key, request_hash, resource_type, resource_id) "
+                    "VALUES (%s, %s, %s, 'invoice', %s) ON CONFLICT (owner_id, key) DO NOTHING RETURNING key",
+                    (claim.owner, claim.key, claim.request_hash, invoice.id),
                 ).fetchone()
                 if taken is None:
                     raise _KeyAlreadyUsed()
@@ -86,9 +91,9 @@ class PostgresInvoiceStore:
                     raise DuplicateInvoice() from cause
                 _write_event(conn, event)
         except _KeyAlreadyUsed:
-            earlier = self.find_by_key(idempotency_key)
+            earlier = self.find_by_key(claim.owner, claim.key)
             assert earlier is not None
-            return earlier, False
+            return earlier[0], False
         return invoice, True
 
     def find(self, invoice_id: UUID) -> Invoice | None:
@@ -115,14 +120,21 @@ class PostgresInvoiceStore:
             ).fetchall()
         return [_invoice(r) for r in rows], int(total)
 
-    def save_paid(self, invoice: Invoice, event: DomainEvent) -> None:
+    def save_paid(self, invoice: Invoice, event: DomainEvent) -> Invoice:
+        # Conditional UPDATE: of two concurrent payments, the second waits for the row lock,
+        # re-reads the row already PAID and matches nothing; only the request whose UPDATE moved
+        # the row writes TuitionPaid, in the same transaction (INV-BIL-002).
         with self._pool.connection() as conn, conn.transaction():
-            conn.execute(
+            moved = conn.execute(
                 "UPDATE billing.invoice SET status = %s, provider_reference = %s, paid_at = %s, updated_at = %s "
-                "WHERE id = %s",
+                "WHERE id = %s AND status = 'ISSUED' RETURNING id",
                 (invoice.status.value, invoice.provider_reference, invoice.paid_at, invoice.updated_at, invoice.id),
-            )
-            _write_event(conn, event)
+            ).fetchone()
+            if moved is not None:
+                _write_event(conn, event)
+                return invoice
+            stored = conn.execute(f"SELECT {COLUMNS} FROM billing.invoice WHERE id = %s", (invoice.id,)).fetchone()
+        return _invoice(stored)
 
 
 def _write_event(conn: psycopg.Connection, event: DomainEvent) -> None:
@@ -161,3 +173,38 @@ def _invoice(row: dict) -> Invoice:
         created_at=row["created_at"].astimezone(UTC),
         updated_at=row["updated_at"].astimezone(UTC),
     )
+
+
+class PostgresProbe:
+    """`SELECT 1` through the pool within a short deadline (HU-PLT-004): a database that does not
+    answer makes the service not ready instead of hanging the probe. The pool bounds the wait for a
+    connection, but a query on a pooled connection whose engine stopped answering (paused,
+    partitioned) would block until TCP gives up; so the check runs on a daemon thread and the probe
+    waits for it at most `timeout_seconds`. The next probes share a check still pending instead of
+    starting another one: at most one thread is ever stuck."""
+
+    name = "database"
+
+    def __init__(self, pool: ConnectionPool, timeout_seconds: float = 2.0) -> None:
+        self._pool = pool
+        self._timeout = timeout_seconds
+        self._lock = threading.Lock()
+        self._pending: Future | None = None
+
+    def ping(self) -> None:
+        with self._lock:
+            if self._pending is None or self._pending.done():
+                self._pending = Future()
+                check = threading.Thread(target=self._select_one, args=(self._pending,), name="probe", daemon=True)
+                check.start()
+            pending = self._pending
+        pending.result(timeout=self._timeout)  # TimeoutError when the engine does not answer in time
+
+    def _select_one(self, outcome: Future) -> None:
+        try:
+            with self._pool.connection(timeout=self._timeout) as conn:
+                conn.execute("SELECT 1")
+        except Exception as error:  # noqa: BLE001 - handed to the waiting probe as is
+            outcome.set_exception(error)
+        else:
+            outcome.set_result(None)

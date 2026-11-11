@@ -11,7 +11,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from billing.adapter.inbound.http.auth import AuthError
-from billing.application.errors import Forbidden, NotFound
+from billing.application.errors import DependencyUnavailable, Forbidden, IdempotencyKeyReused, NotFound
+from billing.application.port.outbound.ports import PaymentDeclined
 from billing.domain.model.errors import BusinessRuleViolation, FieldError, ValidationError
 
 log = logging.getLogger("billing.http")
@@ -55,6 +56,20 @@ def install(app: FastAPI) -> None:
     @app.exception_handler(BusinessRuleViolation)
     async def _business_rule(request: Request, error: BusinessRuleViolation):
         return envelope(request, 422, "BUSINESS_RULE_VIOLATION", error.message)
+
+    @app.exception_handler(PaymentDeclined)
+    async def _declined(request: Request, error: PaymentDeclined):
+        # The provider refused the charge: the invoice stays ISSUED and the student may retry.
+        return envelope(request, 422, "PAYMENT_DECLINED", f"the payment provider declined the charge: {error.reason}")
+
+    @app.exception_handler(IdempotencyKeyReused)
+    async def _key_reused(request: Request, error: IdempotencyKeyReused):
+        return envelope(request, 422, "IDEMPOTENCY_KEY_REUSED", error.message)
+
+    @app.exception_handler(DependencyUnavailable)
+    async def _unavailable(request: Request, error: DependencyUnavailable):
+        log.warning("not ready: %s (%s)", error.message, error.__cause__, extra={"traceId": trace_id(request)})
+        return envelope(request, 503, "SERVICE_UNAVAILABLE", error.message)
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(request: Request, error: StarletteHTTPException):

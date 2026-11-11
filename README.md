@@ -37,9 +37,24 @@ tests/                       test_invoice_model.py, test_invoices.py, test_http.
   unique index of `qone-billing-db`.
 - `pay` moves `ISSUED` to `PAID` exactly once; paying again returns the same invoice with `200`
   (INV-BIL-002, D-04).
+- A declined payment changes nothing: the invoice stays `ISSUED`, no `TuitionPaid` is written and
+  the answer is `422 {"error":"PAYMENT_DECLINED","message":"the payment provider declined the
+  charge: <reason>","traceId":...}`; the student may pay again. A provider that does not answer
+  is `503 SERVICE_UNAVAILABLE` (`payment provider is not reachable`), also with the invoice
+  `ISSUED`. The simulated provider declines, deterministically, every amount whose cents part
+  is `51` (e.g. `amountCents: 185000051`; ISO 8583 code 51, insufficient funds) and approves any
+  other amount, so the seed and the portal's happy path are unchanged.
 - Money is an integer in COP cents end to end (norm 5.4.3).
 - Every creation is idempotent by `Idempotency-Key` (norm 5.3.8); every change writes its event
   to the outbox in the same transaction (norm 5.3.11).
+- No double charge: the invoice id is the provider's idempotency key (a retry after a failed
+  save gets the first charge back), and `save_paid` is a conditional
+  `UPDATE ... WHERE id = ? AND status = 'ISSUED'` whose row count decides which request writes
+  `TuitionPaid`; a request that loses the race answers the invoice already `PAID`.
+- The `Idempotency-Key` belongs to its owner (the user id of the token, or the SERVICE subject):
+  the same key from another caller is another key, so a replay never returns an invoice someone
+  else created. The same owner and key with the same body returns the first invoice (`200`);
+  with another body (SHA-256 of the canonical body) it is `422 IDEMPOTENCY_KEY_REUSED`.
 
 ## How to run it
 
@@ -65,6 +80,18 @@ Integration tests against the real schema (Annex C) run only when `TEST_DATABASE
 TEST_DATABASE_URL=postgresql://billing:password@localhost:5432/billing python -m pytest tests/test_postgres_integration.py
 ```
 
+Quality gates of `ci.yml` (HU-PLT-005), all blocking:
+
+- **Coverage floor: 80 %** of the lines of `src/` (measured 83 % when the gate was set,
+  integration tests skipped). The CI command is
+  `python -m pytest --cov=src --cov-report=term --cov-fail-under=80`; raise the floor here and
+  in `ci.yml` together, never lower it.
+- **Dependency audit:** `pip install pip-audit && pip-audit --skip-editable` over the installed
+  environment.
+- **Secret scan:** gitleaks `v8.21.2` over the whole history (`detect --redact`) with
+  `.gitleaks.toml`: the default rules, with `tests/` allowlisted (its fake keys and tokens are
+  fixtures, not secrets).
+
 Container image and compose (`deploy/`, Annex G): `docker build -f deploy/Dockerfile -t
 qone-billing-api:dev .`, then `deploy/smoke.sh` against the running container (health, the
 envelope on 401 and 404, the correlation header); `ci.yml` builds and smoke-checks the image.
@@ -78,6 +105,7 @@ Explicit limits (norm 5.3.10), declared in `apps/api/factory.py`:
 | Statement timeout | 5 s |
 | Keep-alive | 60 s |
 | Graceful shutdown | 20 s |
+| Ready probe | 2 s deadline (connection and `SELECT 1`) |
 | Header read | imposed by the gateway (NGINX `client_header_timeout`) |
 
 Every log line is JSON with the `traceId` of the request (norm 5.3.9); the detail of a 500
@@ -85,6 +113,18 @@ goes there, never to the client.
 
 `scripts/sync-contracts.sh [ref]` refreshes the contract copies in
 `contracts/openapi/` from `qone-docs` with the GitHub CLI.
+
+Health (HU-PLT-004): `GET /api/v1/billing/health` is liveness (the process answers) and
+`GET /api/v1/billing/health/ready` is readiness: `SELECT 1` through the pool within a 2 s
+deadline (a hung query included) answers 200 `{"status":"ready","service":...,"checks":{"database":"ok"}}`;
+a database that does not answer gives 503 with the common envelope (`SERVICE_UNAVAILABLE`).
+Both are public. Over the in-memory store the ready probe always answers ok.
+
+Metrics (HU-OBS-001): `GET /metrics` at the root of the container (outside `/api/v1`, never
+routed by the gateway) answers the Prometheus text format with
+`http_server_requests_total{service,method,route,status_class}` and
+`http_server_request_duration_seconds{service,method,route}`; `route` is the matched route
+template (`unmatched` otherwise) and the scrape itself is not counted.
 
 ## Branching
 
