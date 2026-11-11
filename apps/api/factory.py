@@ -9,9 +9,10 @@ from datetime import datetime
 from billing.adapter.inbound.http.app import create_app
 from billing.adapter.inbound.http.auth import TokenVerifier
 from billing.adapter.outbound.payment.simulated import SimulatedPaymentProvider
-from billing.adapter.outbound.persistence.memory import InMemoryInvoiceStore
+from billing.adapter.outbound.persistence.memory import InMemoryInvoiceStore, InMemoryProbe
 from billing.adapter.outbound.runtime import SystemClock, Uuid4Generator
 from billing.application.usecase.invoices import InvoiceService
+from billing.application.usecase.readiness import CheckReadiness
 
 # Explicit limits (norm 5.3.10, Annex C), declared here with their values.
 DB_POOL_MAX = 10
@@ -19,6 +20,7 @@ DB_WAIT_SECONDS = 5.0
 DB_STATEMENT_TIMEOUT_MS = 5000
 HTTP_KEEP_ALIVE_SECONDS = 60
 HTTP_GRACEFUL_SHUTDOWN_SECONDS = 20
+READY_TIMEOUT_SECONDS = 2.0  # the ready probe waits this long for a connection
 
 
 class Settings:
@@ -48,17 +50,16 @@ def build_app(settings: Settings | None = None):
     configure_logging(settings.log_level)
     log = logging.getLogger("billing")
     if settings.database_url and settings.database_url != "memory":
-        from billing.adapter.outbound.persistence.postgres import PostgresInvoiceStore, connect
+        from billing.adapter.outbound.persistence.postgres import PostgresInvoiceStore, PostgresProbe, connect
 
-        store = PostgresInvoiceStore(
-            connect(settings.database_url, DB_POOL_MAX, DB_WAIT_SECONDS, DB_STATEMENT_TIMEOUT_MS)
-        )
+        pool = connect(settings.database_url, DB_POOL_MAX, DB_WAIT_SECONDS, DB_STATEMENT_TIMEOUT_MS)
+        store, probe = PostgresInvoiceStore(pool), PostgresProbe(pool, READY_TIMEOUT_SECONDS)
         log.info("store: postgresql (pool max %s, statement timeout %s ms)", DB_POOL_MAX, DB_STATEMENT_TIMEOUT_MS)
     else:
-        store = InMemoryInvoiceStore(_synthetic_invoices())
+        store, probe = InMemoryInvoiceStore(_synthetic_invoices()), InMemoryProbe()
         log.warning("store: in memory with synthetic invoices (BILLING_DATABASE_URL not set); development only")
     service = InvoiceService(store, SystemClock(), Uuid4Generator(), SimulatedPaymentProvider(), settings.current_term)
-    return create_app(service, TokenVerifier(settings.public_key))
+    return create_app(service, TokenVerifier(settings.public_key), CheckReadiness([probe]))
 
 
 def _synthetic_invoices():

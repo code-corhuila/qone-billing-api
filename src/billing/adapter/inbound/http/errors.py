@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from billing.adapter.inbound.http.auth import AuthError
-from billing.application.errors import Forbidden, NotFound
+from billing.application.errors import DependencyUnavailable, Forbidden, NotFound
 from billing.domain.model.errors import BusinessRuleViolation, FieldError, ValidationError
 
 log = logging.getLogger("billing.http")
@@ -55,6 +55,11 @@ def install(app: FastAPI) -> None:
     @app.exception_handler(BusinessRuleViolation)
     async def _business_rule(request: Request, error: BusinessRuleViolation):
         return envelope(request, 422, "BUSINESS_RULE_VIOLATION", error.message)
+
+    @app.exception_handler(DependencyUnavailable)
+    async def _unavailable(request: Request, error: DependencyUnavailable):
+        log.warning("not ready: %s (%s)", error.message, error.__cause__, extra={"traceId": trace_id(request)})
+        return envelope(request, 503, "SERVICE_UNAVAILABLE", error.message)
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(request: Request, error: StarletteHTTPException):
