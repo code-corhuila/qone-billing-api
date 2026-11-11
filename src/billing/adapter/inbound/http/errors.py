@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from billing.adapter.inbound.http.auth import AuthError
-from billing.application.errors import DependencyUnavailable, Forbidden, NotFound
+from billing.application.errors import DependencyUnavailable, Forbidden, IdempotencyKeyReused, NotFound
 from billing.application.port.outbound.ports import PaymentDeclined
 from billing.domain.model.errors import BusinessRuleViolation, FieldError, ValidationError
 
@@ -61,6 +61,10 @@ def install(app: FastAPI) -> None:
     async def _declined(request: Request, error: PaymentDeclined):
         # The provider refused the charge: the invoice stays ISSUED and the student may retry.
         return envelope(request, 422, "PAYMENT_DECLINED", f"the payment provider declined the charge: {error.reason}")
+
+    @app.exception_handler(IdempotencyKeyReused)
+    async def _key_reused(request: Request, error: IdempotencyKeyReused):
+        return envelope(request, 422, "IDEMPOTENCY_KEY_REUSED", error.message)
 
     @app.exception_handler(DependencyUnavailable)
     async def _unavailable(request: Request, error: DependencyUnavailable):

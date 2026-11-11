@@ -19,6 +19,14 @@ class NotFound(Exception):
         self.message = message
 
 
+class IdempotencyKeyReused(Exception):
+    """The same owner sent an Idempotency-Key it already used with another request body (422)."""
+
+    def __init__(self, message: str = "this Idempotency-Key was already used with another request body") -> None:
+        super().__init__(message)
+        self.message = message
+
+
 class DependencyUnavailable(Exception):
     """A dependency the service needs (the database) did not answer: alive, but not ready (503)."""
 
