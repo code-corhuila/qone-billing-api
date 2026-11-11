@@ -3,14 +3,17 @@ and ownership happens here (07-api/authentication.md access matrix); input bound
 term, Idempotency-Key) are checked here with the same field names the contract uses, so the
 HTTP adapter only translates."""
 
+import hashlib
+import json
 from uuid import UUID
 
-from billing.application.errors import DependencyUnavailable, Forbidden, NotFound
+from billing.application.errors import DependencyUnavailable, Forbidden, IdempotencyKeyReused, NotFound
 from billing.application.port.inbound.caller import Caller, Role
 from billing.application.port.inbound.invoices import MAX_LIMIT, InvoiceUseCases, Issued, IssueInvoice, Page
 from billing.application.port.outbound.ports import (
     Clock,
     DuplicateInvoice,
+    IdempotencyClaim,
     IdGenerator,
     InvoiceStore,
     PaymentProvider,
@@ -42,7 +45,10 @@ class InvoiceService(InvoiceUseCases):
         _require(caller, Role.ADMIN)
         if not KEY_MIN <= len(idempotency_key or "") <= KEY_MAX:
             raise ValidationError([FieldError("Idempotency-Key", "header required, 8 to 128 characters")])
-        earlier = self._store.find_by_key(idempotency_key)
+        # The key belongs to its owner (qone-docs#55): another caller's same key is another key,
+        # so a replay never returns an invoice someone else created.
+        claim = IdempotencyClaim(_owner(caller), idempotency_key, _fingerprint(command))
+        earlier = self._replay(claim)
         if earlier is not None:
             return Issued(earlier, created=False)
         invoice = Invoice.issue(
@@ -56,9 +62,11 @@ class InvoiceService(InvoiceUseCases):
         if self._store.exists(invoice.student_id, invoice.term):
             raise _already_invoiced(invoice)
         try:
-            stored, created = self._store.create(invoice, idempotency_key, invoice_issued(invoice))
+            stored, created = self._store.create(invoice, claim, invoice_issued(invoice))
         except DuplicateInvoice:
             raise _already_invoiced(invoice) from None
+        if not created:  # a concurrent request of the same owner claimed the key first
+            stored = self._replay(claim) or stored
         return Issued(stored, created)
 
     def my_invoices(self, caller: Caller, term: str | None, page: int, limit: int) -> Page:
@@ -103,6 +111,17 @@ class InvoiceService(InvoiceUseCases):
             raise NotFound()
         return invoice
 
+    def _replay(self, claim: IdempotencyClaim) -> Invoice | None:
+        """The invoice this owner's key created, if any; the same key with another body is
+        IdempotencyKeyReused (422), never the first invoice."""
+        found = self._store.find_by_key(claim.owner, claim.key)
+        if found is None:
+            return None
+        invoice, request_hash = found
+        if request_hash != claim.request_hash:
+            raise IdempotencyKeyReused()
+        return invoice
+
     def _visible(self, caller: Caller, invoice_id: UUID) -> Invoice:
         invoice = self._store.find(invoice_id)
         if invoice is None or (caller.role is Role.STUDENT and invoice.student_id != caller.user_id):
@@ -113,6 +132,23 @@ class InvoiceService(InvoiceUseCases):
 def _require(caller: Caller, *roles: Role) -> None:
     if caller.role not in roles:
         raise Forbidden()
+
+
+def _owner(caller: Caller) -> str:
+    """Who owns a key: the user id of the token, or the subject of a SERVICE token."""
+    return str(caller.user_id) if caller.user_id is not None else caller.subject
+
+
+def _fingerprint(command: IssueInvoice) -> str:
+    """SHA-256 of the canonical body: the contract's field names, sorted, no spaces, UTF-8."""
+    body = {
+        "amountCents": command.amount_cents,
+        "studentId": str(command.student_id),
+        "studentName": command.student_name,
+        "term": command.term,
+    }
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _already_invoiced(invoice: Invoice) -> BusinessRuleViolation:

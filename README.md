@@ -51,6 +51,10 @@ tests/                       test_invoice_model.py, test_invoices.py, test_http.
   save gets the first charge back), and `save_paid` is a conditional
   `UPDATE ... WHERE id = ? AND status = 'ISSUED'` whose row count decides which request writes
   `TuitionPaid`; a request that loses the race answers the invoice already `PAID`.
+- The `Idempotency-Key` belongs to its owner (the user id of the token, or the SERVICE subject):
+  the same key from another caller is another key, so a replay never returns an invoice someone
+  else created. The same owner and key with the same body returns the first invoice (`200`);
+  with another body (SHA-256 of the canonical body) it is `422 IDEMPOTENCY_KEY_REUSED`.
 
 ## How to run it
 
