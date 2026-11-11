@@ -3,6 +3,7 @@ this service's resources, with the server in memory and the in-memory store."""
 
 import pytest
 
+from tests.fakes import FakeProvider
 from tests.http_support import (
     CARLOS,
     LAURA,
@@ -180,6 +181,16 @@ class TestRepresentationAndTransitions:
         assert first.json()["providerReference"].startswith("SIM-") and first.json()["paidAt"] is not None
         again = client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=santiago())
         assert again.status_code == 200 and again.json() == first.json()
+
+    def test_a_second_pay_does_not_charge_again_and_another_student_cannot_pay_it(self):
+        provider = FakeProvider()
+        client, store = make_client(provider=provider)
+        first = client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=santiago())
+        assert client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=laura()).status_code == 404
+        again = client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=santiago())
+        assert first.status_code == again.status_code == 200 and again.json() == first.json()
+        assert provider.keys == [SANTIAGO_INVOICE] and len(provider.charges) == 1
+        assert [e.event_type for e in store.outbox] == ["TuitionPaid"]
 
     def test_only_the_owner_pays(self, client):
         assert client.post(f"{BASE}/invoices/{SANTIAGO_INVOICE}/pay", headers=laura()).status_code == 404

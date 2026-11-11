@@ -31,9 +31,17 @@ class SequenceIds:
 
 
 class FakeProvider:
+    """Charges once per idempotency key, like a real provider: a retry with the same key returns
+    the first reference. `charges` keeps the invoices actually charged, `keys` every key received."""
+
     def __init__(self) -> None:
         self.charges: list[Invoice] = []
+        self.keys: list[str] = []
+        self._references: dict[str, str] = {}
 
-    def charge(self, invoice: Invoice) -> str:
-        self.charges.append(invoice)
-        return f"SIM-{len(self.charges):08d}"
+    def charge(self, invoice: Invoice, idempotency_key: str) -> str:
+        self.keys.append(idempotency_key)
+        if idempotency_key not in self._references:
+            self.charges.append(invoice)
+            self._references[idempotency_key] = f"SIM-{len(self.charges):08d}"
+        return self._references[idempotency_key]

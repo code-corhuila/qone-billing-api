@@ -3,11 +3,14 @@ TEST_DATABASE_URL. Skipped, not failed, when the variable is absent. A fake stor
 use case called it; only the engine proves the SQL, the types and the migration exist."""
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 
+from billing.application.port.inbound.caller import Caller, Role
 from billing.application.port.outbound.ports import DuplicateInvoice
 from billing.domain.model.events import invoice_issued, tuition_paid
 from billing.domain.model.invoice import Invoice, InvoiceStatus
@@ -94,6 +97,74 @@ def test_save_paid_updates_the_row_and_writes_tuition_paid(store, pool):
         and found.provider_reference == "SIM-7F3A9C21"
         and found.paid_at == paid.paid_at
     )
+    assert [r["event_type"] for r in outbox(pool)] == ["InvoiceIssued", "TuitionPaid"]
+
+
+def test_save_paid_moves_only_an_issued_row_and_a_late_one_gets_the_stored_invoice(store, pool):
+    invoice = new_invoice()
+    store.create(invoice, "key-pay-0000002", invoice_issued(invoice))
+    first, _ = invoice.pay("SIM-00000001", datetime(2026, 10, 13, 9, 30, tzinfo=UTC))
+    late, _ = invoice.pay("SIM-00000002", datetime(2026, 10, 13, 9, 31, tzinfo=UTC))
+    assert store.save_paid(first, tuition_paid(first)) == first
+    assert store.save_paid(late, tuition_paid(late)) == first, "the conditional UPDATE matched no row"
+    assert store.find(invoice.id).provider_reference == "SIM-00000001"
+    assert [r["event_type"] for r in outbox(pool)] == ["InvoiceIssued", "TuitionPaid"]
+
+
+def paying_service(store, provider):
+    from billing.application.usecase.invoices import InvoiceService
+    from tests.fakes import FixedClock, SequenceIds
+
+    return InvoiceService(store, FixedClock(), SequenceIds(), provider, current_term="2026-B")
+
+
+def test_two_concurrent_payments_of_the_same_invoice_charge_once_and_write_one_tuition_paid(store, pool):
+    from billing.adapter.outbound.payment.simulated import SimulatedPaymentProvider
+
+    invoice = new_invoice()
+    store.create(invoice, "key-race-0000001", invoice_issued(invoice))
+    simulator = SimulatedPaymentProvider()
+    both_read_it = threading.Barrier(2, timeout=10)
+
+    class Racing:
+        def charge(self, invoice, idempotency_key):
+            both_read_it.wait()  # both requests saw the invoice ISSUED before either one charges
+            return simulator.charge(invoice, idempotency_key)
+
+    service = paying_service(store, Racing())
+    student = Caller(STUDENT, Role.STUDENT, "Nuevo Estudiante", str(STUDENT))
+    with ThreadPoolExecutor(max_workers=2) as threads:
+        results = list(threads.map(lambda _: service.pay(student, invoice.id), range(2)))
+    assert results[0] == results[1] and results[0].status is InvoiceStatus.PAID
+    assert len(simulator.charges) == 1, "one charge at the provider"
+    paid_events = [r for r in outbox(pool) if r["event_type"] == "TuitionPaid"]
+    assert len(paid_events) == 1 and paid_events[0]["payload"]["providerReference"] == results[0].provider_reference
+
+
+def test_a_retry_after_the_save_failed_charges_once(store, pool):
+    import psycopg
+
+    from billing.adapter.outbound.payment.simulated import SimulatedPaymentProvider
+
+    invoice = new_invoice()
+    store.create(invoice, "key-retry-pay-01", invoice_issued(invoice))
+    simulator, save_paid, calls = SimulatedPaymentProvider(), store.save_paid, []
+
+    def fails_the_first_time(paid, event):
+        calls.append(paid)
+        if len(calls) == 1:
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+        return save_paid(paid, event)
+
+    store.save_paid = fails_the_first_time
+    service = paying_service(store, simulator)
+    student = Caller(STUDENT, Role.STUDENT, "Nuevo Estudiante", str(STUDENT))
+    with pytest.raises(psycopg.OperationalError):
+        service.pay(student, invoice.id)
+    assert store.find(invoice.id).status is InvoiceStatus.ISSUED
+    paid = service.pay(student, invoice.id)
+    assert paid.status is InvoiceStatus.PAID and len(simulator.charges) == 1
+    assert paid.provider_reference == simulator.charges[str(invoice.id)]
     assert [r["event_type"] for r in outbox(pool)] == ["InvoiceIssued", "TuitionPaid"]
 
 

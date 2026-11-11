@@ -129,6 +129,43 @@ class TestPay:
         with pytest.raises(NotFound):
             service_.pay(laura, uuid4())
 
+    def test_the_invoice_id_is_the_providers_idempotency_key(self, world):
+        _, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        service_.pay(laura, invoice.id)
+        assert provider.keys == [str(invoice.id)]
+
+    def test_a_retry_after_the_save_failed_charges_once(self, world):
+        store, _, provider, service_ = world
+        invoice = issue(service_).invoice
+        save_paid, calls = store.save_paid, []
+
+        def fails_the_first_time(paid, event):
+            calls.append(paid)
+            if len(calls) == 1:
+                raise RuntimeError("the database went away before the commit")
+            return save_paid(paid, event)
+
+        store.save_paid = fails_the_first_time
+        with pytest.raises(RuntimeError):
+            service_.pay(laura, invoice.id)
+        assert store.find(invoice.id).status is InvoiceStatus.ISSUED, "nothing was saved"
+        paid = service_.pay(laura, invoice.id)
+        assert paid.status is InvoiceStatus.PAID and paid.provider_reference == "SIM-00000001"
+        assert provider.keys == [str(invoice.id)] * 2 and len(provider.charges) == 1
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued", "TuitionPaid"]
+
+    def test_a_request_that_read_it_issued_after_another_paid_it_gets_the_paid_one_and_no_second_event(self, world):
+        store, clock, provider, service_ = world
+        invoice = issue(service_).invoice
+        first = service_.pay(laura, invoice.id)
+        store.find = lambda _id: invoice  # a concurrent request read it while it was still ISSUED
+        clock.tick(seconds=1)
+        again = service_.pay(laura, invoice.id)
+        assert again == first, "the stored PAID invoice, not a second payment"
+        assert len(provider.charges) == 1
+        assert [e.event_type for e in store.outbox] == ["InvoiceIssued", "TuitionPaid"]
+
 
 class TestGet:
     def test_the_owner_an_admin_and_a_service_read_it(self, world):

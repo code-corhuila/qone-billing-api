@@ -7,7 +7,7 @@ import pytest
 
 from billing.adapter.outbound.persistence.memory import InMemoryInvoiceStore
 from billing.application.port.outbound.ports import DuplicateInvoice
-from billing.domain.model.events import invoice_issued
+from billing.domain.model.events import invoice_issued, tuition_paid
 from billing.domain.model.invoice import Invoice
 
 NOW = datetime(2026, 10, 12, tzinfo=UTC)
@@ -24,6 +24,17 @@ def test_a_used_key_returns_the_first_invoice_and_keeps_nothing_new():
     again, created_again = store.create(other, "key-0001", invoice_issued(other))
     assert created and not created_again and again == first
     assert store.find(other.id) is None and len(store.outbox) == 1
+
+
+def test_save_paid_moves_only_an_issued_invoice_and_returns_the_stored_one():
+    store = InMemoryInvoiceStore()
+    invoice = an_invoice()
+    store.create(invoice, "key-0001", invoice_issued(invoice))
+    first, _ = invoice.pay("SIM-00000001", NOW)
+    assert store.save_paid(first, tuition_paid(first)) == first
+    late, _ = invoice.pay("SIM-00000002", NOW)
+    assert store.save_paid(late, tuition_paid(late)) == first
+    assert [e.event_type for e in store.outbox] == ["InvoiceIssued", "TuitionPaid"]
 
 
 def test_the_unique_index_of_inv_bil_001_is_simulated():
