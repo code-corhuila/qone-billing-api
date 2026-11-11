@@ -1,6 +1,7 @@
 """The FastAPI application of the billing service: correlation and access log (norm 5.3.9),
-the error envelope, the routes. `create_app` receives the ports already built; the composition
-root (apps/api) is the only module that knows the concrete types."""
+the RED metrics and `/metrics` (HU-OBS-001), the error envelope, the routes. `create_app`
+receives the ports already built; the composition root (apps/api) is the only module that knows
+the concrete types."""
 
 import logging
 import time
@@ -8,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 
-from billing.adapter.inbound.http import errors
+from billing.adapter.inbound.http import errors, metrics
 from billing.adapter.inbound.http.auth import TokenVerifier
 from billing.adapter.inbound.http.router import router
 from billing.application.port.inbound.invoices import InvoiceUseCases
@@ -52,6 +53,7 @@ def create_app(use_cases: InvoiceUseCases, verifier: TokenVerifier, readiness: C
         )
         return response
 
+    metrics.install(app, SERVICE)
     errors.install(app)
     app.include_router(router)
     return app
