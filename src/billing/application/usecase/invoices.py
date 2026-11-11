@@ -77,11 +77,13 @@ class InvoiceService(InvoiceUseCases):
         invoice = self._visible(caller, invoice_id)
         if invoice.is_paid:
             return invoice  # INV-BIL-002, D-04: the same invoice, no second charge
-        reference = self._payments.charge(invoice)
-        paid, changed = invoice.pay(reference, self._clock.now())
-        if changed:
-            self._store.save_paid(paid, tuition_paid(paid))
-        return paid
+        # The invoice id is the provider's idempotency key: a retry after a failed save, or a
+        # second request racing this one, gets the first charge back instead of a new one. The
+        # store's conditional update decides which request writes TuitionPaid; the other one
+        # gets the invoice already PAID.
+        reference = self._payments.charge(invoice, idempotency_key=str(invoice.id))
+        paid, _ = invoice.pay(reference, self._clock.now())
+        return self._store.save_paid(paid, tuition_paid(paid))
 
     def current_of(self, caller: Caller, student_id: UUID) -> Invoice:
         _require(caller, Role.ADMIN, Role.SERVICE)
